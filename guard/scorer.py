@@ -87,21 +87,21 @@ def calculate_risk_score(
     # Feature 1: Endpoint burst (0-40 points)
     burst = compute_endpoint_burst_max_1s(history, current_endpoint)
     if burst >= cfg.burst_threshold:
-        pts = min(40, (burst - cfg.burst_threshold + 1) * 15)
+        pts = min(40, (burst - cfg.burst_threshold + 1) * 12)
         score += pts
         reasons.append(f"burst={burst}")
 
-    # Feature 2: Request interval CV (0-35 points)
+    # Feature 2: Request interval CV (0-40 points)
     cv = compute_req_interval_cv(history)
     if len(history) >= 3 and cv < cfg.cv_threshold:
-        pts = min(35, int((cfg.cv_threshold - cv) / cfg.cv_threshold * 35))
+        pts = min(40, int((cfg.cv_threshold - cv) / cfg.cv_threshold * 40))
         score += pts
         reasons.append(f"cv={cv:.3f}")
 
-    # Feature 3: Target retry count (0-25 points)
+    # Feature 3: Target retry count (0-50 points)
     retries = compute_target_retry_count(history, current_target_key)
     if retries >= cfg.retry_threshold:
-        pts = min(25, (retries - cfg.retry_threshold + 1) * 8)
+        pts = min(50, (retries - cfg.retry_threshold + 1) * 10)
         score += pts
         reasons.append(f"retries={retries}")
 

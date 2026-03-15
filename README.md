@@ -23,16 +23,16 @@ Client → [AI 보안 퀴즈] → 보안 서버 (대기열 + 302) → 백엔드 
 |---------|------|------|-----|
 | `endpoint_burst_max_1s` | 같은 API를 1초에 몇 번 호출했는가 | 1 | 3+ |
 | `req_interval_cv` | 요청 간격의 변동계수 (CV = 표준편차/평균) | ~0.41 (불규칙) | ~0.06 (기계적) |
-| `target_retry_count` | 같은 대상(좌석/주문)을 몇 번 재시도했는가 | 1 | 4+ |
+| `target_retry_count` | 같은 대상(좌석/주문)을 몇 번 재시도했는가 | 1 | 2+ |
 
 ### 스코어링
 
 | Feature | 조건 | 점수 |
 |---------|------|------|
 | Burst | >= 3회/초 | 최대 40점 |
-| CV | < 0.15 (너무 규칙적) | 최대 35점 |
-| Retry | >= 3회 재시도 | 최대 25점 |
-| **합계** | **60점 이상** | **302 차단** |
+| CV | < 0.25 (너무 규칙적) | 최대 40점 |
+| Retry | >= 2회 재시도 | 최대 50점 |
+| **합계** | **45점 이상** | **302 차단** |
 
 ## 데이터 흐름
 
@@ -97,9 +97,9 @@ AI 보안 퀴즈(다른 팀 담당) 통과 후 대기열로 진입합니다.
 | `GUARD_ENABLED` | `true` | 킬스위치 |
 | `UPSTREAM_URL` | `http://localhost:8080` | 백엔드 서버 주소 |
 | `BURST_THRESHOLD` | `3` | 1초 내 동일 API 호출 임계값 |
-| `CV_THRESHOLD` | `0.15` | 요청 간격 CV 임계값 (미만 시 의심) |
-| `RETRY_THRESHOLD` | `3` | 동일 대상 재시도 임계값 |
-| `SCORE_HIGH` | `60` | 차단 스코어 임계값 |
+| `CV_THRESHOLD` | `0.25` | 요청 간격 CV 임계값 (미만 시 의심) |
+| `RETRY_THRESHOLD` | `2` | 동일 대상 재시도 임계값 |
+| `SCORE_HIGH` | `45` | 차단 스코어 임계값 |
 | `QUEUE_WAIT_MIN_SECONDS` | `3` | 대기열 최소 대기 시간 |
 | `SESSION_IDLE_TIMEOUT_SECONDS` | `60` | 세션 유휴 타임아웃 |
 | `SENSITIVE_PATHS` | `/api/ticketing,...` | Guard 적용 대상 경로 |

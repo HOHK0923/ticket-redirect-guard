@@ -25,13 +25,13 @@ class Settings(BaseSettings):
 
     # req_interval_cv: coefficient of variation of request intervals
     # LOWER cv = more suspicious (mechanical/bot-like)
-    cv_threshold: float = 0.15
+    cv_threshold: float = 0.25
 
     # target_retry_count: same target retried N+ times
-    retry_threshold: int = 3
+    retry_threshold: int = 2
 
     # --- Score threshold ---
-    score_high: int = 60  # score >= this → block (302 redirect)
+    score_high: int = 45  # score >= this → block (302 redirect)
 
     # --- Queue ---
     queue_wait_min_seconds: int = 3  # minimum wait time in queue
