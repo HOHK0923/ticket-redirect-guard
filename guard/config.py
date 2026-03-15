@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
-from functools import lru_cache
+from functools import cached_property, lru_cache
 
 from pydantic_settings import BaseSettings
 
@@ -13,27 +13,36 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://redis:6379/0"
 
-    # Rate windows (seconds) & limits
-    rate_window_short: int = 10
-    rate_window_long: int = 60
-    rate_limit_short: int = 15
-    rate_limit_long: int = 60
+    # Upstream backend server to proxy to
+    upstream_url: str = "http://localhost:8080"
 
-    # Score thresholds
-    score_mid: int = 30
-    score_high: int = 70
+    # --- Session tracking ---
+    session_idle_timeout_seconds: int = 60
 
-    # Delay
-    delay_min_ms: int = 100
-    delay_max_ms: int = 800
+    # --- AI feature thresholds ---
+    # endpoint_burst_max_1s: max calls to same endpoint in 1 second
+    burst_threshold: int = 3
 
-    # Whitelist
-    whitelist_ips: str = "127.0.0.1"
-    whitelist_paths: str = "/health,/metrics"
+    # req_interval_cv: coefficient of variation of request intervals
+    # LOWER cv = more suspicious (mechanical/bot-like)
+    cv_threshold: float = 0.15
+
+    # target_retry_count: same target retried N+ times
+    retry_threshold: int = 3
+
+    # --- Score threshold ---
+    score_high: int = 60  # score >= this → block (302 redirect)
+
+    # --- Queue ---
+    queue_wait_min_seconds: int = 3  # minimum wait time in queue
+
+    # --- Whitelist ---
+    whitelist_ips: str = ""
+    whitelist_paths: str = "/_guard/health,/_guard/metrics"
     whitelist_uas: str = ""
 
-    # Sensitive paths
-    sensitive_paths: str = "/seat,/reserve,/pay,/checkout,/order"
+    # --- Sensitive endpoint patterns ---
+    sensitive_paths: str = "/api/ticketing,/api/bookings,/api/payments"
 
     # Redirect target when bot detected (silent redirect)
     redirect_url: str = "/"
@@ -46,17 +55,33 @@ class Settings(BaseSettings):
     def _parse_csv(value: str) -> list[str]:
         return [s.strip() for s in value.split(",") if s.strip()]
 
-    def get_whitelist_ips(self) -> list[str]:
+    @cached_property
+    def _whitelist_ips(self) -> list[str]:
         return self._parse_csv(self.whitelist_ips)
 
-    def get_whitelist_paths(self) -> list[str]:
+    @cached_property
+    def _whitelist_paths(self) -> list[str]:
         return self._parse_csv(self.whitelist_paths)
 
-    def get_whitelist_uas(self) -> list[str]:
+    @cached_property
+    def _whitelist_uas(self) -> list[str]:
         return self._parse_csv(self.whitelist_uas)
 
-    def get_sensitive_paths(self) -> list[str]:
+    @cached_property
+    def _sensitive_paths(self) -> list[str]:
         return self._parse_csv(self.sensitive_paths)
+
+    def get_whitelist_ips(self) -> list[str]:
+        return self._whitelist_ips
+
+    def get_whitelist_paths(self) -> list[str]:
+        return self._whitelist_paths
+
+    def get_whitelist_uas(self) -> list[str]:
+        return self._whitelist_uas
+
+    def get_sensitive_paths(self) -> list[str]:
+        return self._sensitive_paths
 
     def is_ip_whitelisted(self, ip: str) -> bool:
         try:

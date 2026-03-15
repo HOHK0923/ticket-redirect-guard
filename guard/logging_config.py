@@ -15,10 +15,11 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "msg": record.getMessage(),
         }
-        # Merge extra fields passed via `extra={"guard": {...}}`
-        guard_data = getattr(record, "guard", None)
-        if guard_data and isinstance(guard_data, dict):
-            log_entry.update(guard_data)
+        # Merge extra fields
+        for key in ("guard", "server_request_log", "domain_event"):
+            data = getattr(record, key, None)
+            if data and isinstance(data, dict):
+                log_entry[key] = data
         return json.dumps(log_entry, ensure_ascii=False)
 
 

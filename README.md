@@ -1,140 +1,134 @@
 # Ticket Redirect Guard
 
-어떤 FastAPI / Starlette 사이트에든 **한 줄**로 적용할 수 있는 봇/매크로 트래픽 완화 미들웨어입니다.
+봇/매크로를 세션 행동 분석으로 탐지하여 **대기열 + 302 리다이렉트**로 차단하는 독립형 보안 프록시 서버입니다.
 
-의심 트래픽에 **302 리다이렉트 + 랜덤 지연**을 걸어 자동화 스크립트를 교란하고,
-정상 유저(브라우저)는 전혀 영향을 받지 않습니다.
+## 아키텍처
 
-## 동작 원리
-
-1. 모든 요청을 미들웨어가 가로채서 **risk score (0~100)**를 계산합니다
-2. score 구간별 처리:
-   - **LOW** (0~29): 바로 통과
-   - **MID** (30~69): 랜덤 지연(100~800ms) 또는 40% 확률로 302 리다이렉트
-   - **HIGH** (70~100): 무조건 302 리다이렉트 (메인 페이지로)
-3. 봇은 302 응답만 받고 실제 데이터에 접근하지 못합니다
-4. 브라우저는 302를 자동 처리하므로 정상 유저는 영향 없습니다
-
-### Risk Score 계산 입력
-
-| 신호 | 점수 |
-|------|------|
-| IP별 요청 빈도 (10초/60초 슬라이딩 윈도우) | 최대 70점 |
-| 세션/쿠키 없음 | 15점 |
-| User-Agent 없음 | 10점 |
-| Accept-Language 없음 | 5점 |
-| 민감 경로 접근 (/api/pay, /api/checkout 등) | 10점 |
-
-## 적용 방법
-
-### 1. 패키지 설치
-
-```bash
-# guard/ 디렉토리를 프로젝트에 복사하고 의존성을 설치합니다
-pip install fastapi uvicorn redis[hiredis] pydantic-settings
+```
+Client → [AI 보안 퀴즈] → 보안 서버 (대기열 + 302) → 백엔드 서버
+              │                    │
+              │               ┌────┴────┐
+              │               │ 정상유저  │→ 좌석 선택으로 통과
+              └──(다른 팀)──→  │  봇/매크로 │→ 302 리다이렉트 (차단)
+                              └─────────┘
 ```
 
-### 2. 미들웨어 적용 (한 줄)
+**담당 범위**: AI 퀴즈 통과 후 → 대기열("잠시만 기다려주세요!") → 행동 분석 → 302 리다이렉트
 
-```python
-from fastapi import FastAPI
-from guard import GuardMiddleware
+## 봇 탐지 방식 (AI Feature 3개)
 
-app = FastAPI()
+백엔드를 통과하는 요청 로그(`server_request_log`)를 세션 단위로 분석하여 3개의 Feature를 실시간 계산합니다.
 
-# 이 한 줄이면 됩니다
-app.add_middleware(
-    GuardMiddleware,
-    bypass_paths={"/", "/about", "/login"},  # guard를 건너뛸 경로
-)
-```
+| Feature | 의미 | 사람 | 봇 |
+|---------|------|------|-----|
+| `endpoint_burst_max_1s` | 같은 API를 1초에 몇 번 호출했는가 | 1 | 3+ |
+| `req_interval_cv` | 요청 간격의 변동계수 (CV = 표준편차/평균) | ~0.41 (불규칙) | ~0.06 (기계적) |
+| `target_retry_count` | 같은 대상(좌석/주문)을 몇 번 재시도했는가 | 1 | 4+ |
 
-### 3. Redis 실행
+### 스코어링
+
+| Feature | 조건 | 점수 |
+|---------|------|------|
+| Burst | >= 3회/초 | 최대 40점 |
+| CV | < 0.15 (너무 규칙적) | 최대 35점 |
+| Retry | >= 3회 재시도 | 최대 25점 |
+| **합계** | **60점 이상** | **302 차단** |
+
+## 데이터 흐름
+
+### 수집하는 Raw Data
+
+**server_request_log** (API 호출 1건 = 1로그):
+- 식별자: `UUID`, `X-User-Id`, `X-Session-Ticket`
+- 대상: `showScheduleId`, `seatIds`, `orderId`
+- 시간: `ts_ms_server`
+- 요청: `endpoint`, `status`, `latency_ms`, `ip`, `device_id`
+
+**domain_event_log** (퍼널 단계 이벤트):
+- `seatmap_view` → `seat_hold_attempt` → `checkout_enter` → `payment_attempt` → `payment_success` / `payment_fail`
+
+### 엔드포인트 매핑
+
+| 백엔드 API | 도메인 이벤트 |
+|-----------|-------------|
+| `GET /api/ticketing/{id}/seatmap` | `seatmap_view` |
+| `POST /api/ticketing/{id}/hold/seat` | `seat_hold_attempt` |
+| `POST /api/bookings` | `checkout_enter` |
+| `POST /api/bookings/{id}/payment-ready` | `payment_attempt` |
+| `POST /api/payments/confirm` | `payment_success` |
+| `GET /api/payments/fail` | `payment_fail` |
+
+## 빠른 시작
 
 ```bash
-docker compose up -d   # Redis 7 Alpine 컨테이너
-```
+# 1. 클론 및 설치
+git clone https://github.com/HOHK0923/ticket-redirect-guard.git
+cd ticket-redirect-guard
+pip install -r requirements.txt
 
-### 4. 환경변수 설정
+# 2. Redis
+docker compose up -d
 
-`.env` 파일을 생성합니다 (`.env.example` 참고):
-
-```bash
+# 3. 환경변수
 cp .env.example .env
-# 필요에 따라 값을 수정합니다
+
+# 4. 보안 서버 실행
+uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-### 5. 서버 실행
+## AI 퀴즈 연동
 
-```bash
-uvicorn your_app:app --port 8000
+AI 보안 퀴즈(다른 팀 담당) 통과 후 대기열로 진입합니다.
+
+```
+1. 사용자가 AI 퀴즈 통과
+2. 퀴즈 시스템이 GET /_guard/queue 로 리다이렉트
+3. 대기열 페이지 표시 ("잠시만 기다려주세요!")
+4. 클라이언트가 /_guard/queue/status 폴링
+5. risk score 확인 후:
+   - 통과 → 좌석 선택 페이지로 302
+   - 차단 → 메인 페이지로 302
 ```
 
 ## 설정
 
-`.env` 파일로 모든 설정을 관리합니다.
-
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `GUARD_ENABLED` | `true` | 킬스위치. `false`면 미들웨어 비활성화 |
-| `REDIS_URL` | `redis://redis:6379/0` | Redis 연결 URL |
-| `SCORE_MID` | `30` | MID 구간 시작 점수 |
-| `SCORE_HIGH` | `70` | HIGH 구간 시작 점수 |
-| `RATE_LIMIT_SHORT` | `15` | 10초 내 허용 요청 수 |
-| `RATE_LIMIT_LONG` | `60` | 60초 내 허용 요청 수 |
-| `DELAY_MIN_MS` | `100` | MID 구간 최소 지연(ms) |
-| `DELAY_MAX_MS` | `800` | MID 구간 최대 지연(ms) |
-| `WHITELIST_IPS` | `127.0.0.1` | 화이트리스트 IP (쉼표 구분, CIDR 지원) |
-| `WHITELIST_PATHS` | `/health,/metrics` | 화이트리스트 경로 |
-| `WHITELIST_UAS` | `` | 화이트리스트 User-Agent (부분 매칭) |
-| `SENSITIVE_PATHS` | `/api/seats,...` | 가중치 적용 경로 |
-| `REDIRECT_URL` | `/` | 봇 감지 시 리다이렉트 대상 URL |
+| `GUARD_ENABLED` | `true` | 킬스위치 |
+| `UPSTREAM_URL` | `http://localhost:8080` | 백엔드 서버 주소 |
+| `BURST_THRESHOLD` | `3` | 1초 내 동일 API 호출 임계값 |
+| `CV_THRESHOLD` | `0.15` | 요청 간격 CV 임계값 (미만 시 의심) |
+| `RETRY_THRESHOLD` | `3` | 동일 대상 재시도 임계값 |
+| `SCORE_HIGH` | `60` | 차단 스코어 임계값 |
+| `QUEUE_WAIT_MIN_SECONDS` | `3` | 대기열 최소 대기 시간 |
+| `SESSION_IDLE_TIMEOUT_SECONDS` | `60` | 세션 유휴 타임아웃 |
+| `SENSITIVE_PATHS` | `/api/ticketing,...` | Guard 적용 대상 경로 |
 
 ## 프로젝트 구조
 
 ```
+server.py                # 보안 서버 엔트리포인트
 guard/
-  __init__.py        # GuardMiddleware export
-  middleware.py      # 핵심 미들웨어 (score → pass/delay/redirect)
-  config.py          # ENV 기반 설정 (pydantic-settings)
-  scorer.py          # Risk score 계산기
-  rate_limiter.py    # Redis sorted set 슬라이딩 윈도우 카운터
-  redis_client.py    # 비동기 Redis 연결 풀
-  metrics.py         # 인메모리 메트릭 수집
-  logging_config.py  # JSON 구조화 로그
+  __init__.py             # GuardMiddleware export
+  middleware.py           # 핵심 미들웨어 (세션 기반 행동 분석)
+  scorer.py               # AI feature 기반 risk score 계산
+  session_tracker.py      # Redis 세션 히스토리 추적
+  request_parser.py       # 요청에서 세션/대상 데이터 추출
+  queue.py                # 대기열 페이지 및 상태 API
+  proxy.py                # 리버스 프록시 (백엔드 전달)
+  models.py               # 데이터 모델 (ServerRequestLog, DomainEventLog 등)
+  config.py               # ENV 기반 설정
+  redis_client.py         # 비동기 Redis 연결
+  metrics.py              # 인메모리 메트릭
+  logging_config.py       # JSON 구조화 로그
 examples/
-  basic_app.py       # 쇼핑몰 예제 (적용 방법 데모)
-```
-
-## 테스트
-
-```bash
-# Redis 실행
-docker compose up -d
-
-# 예제 앱 실행
-uvicorn examples.basic_app:app --port 8000
-
-# 정상 유저 (200 OK)
-curl -H "User-Agent: Mozilla/5.0" \
-     -H "Accept-Language: ko-KR" \
-     -b "sid=abc; session_id=def" \
-     http://localhost:8000/api/checkout
-
-# 봇 시뮬레이션 (점점 302 증가)
-for i in $(seq 1 20); do
-  curl -s -o /dev/null -w "요청 $i → HTTP %{http_code}\n" \
-    -H "User-Agent: " \
-    http://localhost:8000/api/checkout
-done
-
-# 메트릭 확인
-curl http://localhost:8000/metrics | python3 -m json.tool
+  backend_app.py          # 예제 백엔드 서버 (테스트용)
 ```
 
 ## 운영 참고
 
-- 문제 발생 시 `GUARD_ENABLED=false`로 즉시 비활성화 가능합니다
-- `WHITELIST_IPS`에 내부 IP 대역(CIDR)을 추가하여 내부 트래픽을 제외할 수 있습니다
-- 로그는 JSON 형식으로 stdout 출력되며, 외부 수집기와 연동 가능합니다
-- score 임계값, rate limit, 지연 범위 모두 ENV로 실시간 조정 가능합니다
+- `GUARD_ENABLED=false` → 모든 요청을 그대로 백엔드에 전달합니다
+- `/_guard/health` → 보안 서버 상태 확인
+- `/_guard/metrics` → 통과/차단/대기열 메트릭
+- `/_guard/log` → 최근 가드 판단 로그 (최대 500건)
+- 모든 로그는 JSON 형식으로 stdout 출력됩니다

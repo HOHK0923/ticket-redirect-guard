@@ -1,77 +1,118 @@
-"""Risk score calculator.
+"""Risk score calculator based on AI pipeline features.
 
-Combines multiple signals into a 0-100 integer score.
+Computes 3 behavioral features from session request history:
+  1. endpoint_burst_max_1s: rapid calls to same endpoint
+  2. req_interval_cv: regularity of request timing
+  3. target_retry_count: repeated attempts on same target
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import List
+import math
 
 from guard.config import get_settings
+from guard.models import ScoreResult, SessionRequestRecord
 
 
-@dataclass
-class ScoreResult:
-    score: int
-    reasons: List[str] = field(default_factory=list)
+def compute_endpoint_burst_max_1s(
+    history: list[SessionRequestRecord],
+    current_endpoint: str,
+) -> int:
+    """Max calls to the same endpoint within any 1-second window.
+
+    Uses O(n) two-pointer sliding window.
+    """
+    timestamps = sorted(
+        r.ts_ms for r in history if r.endpoint == current_endpoint
+    )
+    if len(timestamps) <= 1:
+        return len(timestamps)
+
+    max_burst = 1
+    left = 0
+    for right in range(len(timestamps)):
+        while timestamps[right] - timestamps[left] > 1000:
+            left += 1
+        max_burst = max(max_burst, right - left + 1)
+
+    return max_burst
+
+
+def compute_req_interval_cv(history: list[SessionRequestRecord]) -> float:
+    """Coefficient of Variation of request intervals.
+
+    CV = stddev / mean
+    Returns 1.0 (human-like) if fewer than 3 requests.
+    """
+    if len(history) < 3:
+        return 1.0
+
+    timestamps = sorted(r.ts_ms for r in history)
+    intervals = [
+        timestamps[i + 1] - timestamps[i]
+        for i in range(len(timestamps) - 1)
+    ]
+
+    if not intervals:
+        return 1.0
+
+    mean = sum(intervals) / len(intervals)
+    if mean == 0:
+        return 0.0  # all same timestamp = very suspicious
+
+    variance = sum((x - mean) ** 2 for x in intervals) / len(intervals)
+    return math.sqrt(variance) / mean
+
+
+def compute_target_retry_count(
+    history: list[SessionRequestRecord],
+    current_target_key: str,
+) -> int:
+    """Count how many times the same target was accessed in this session."""
+    if not current_target_key:
+        return 0
+    return sum(1 for r in history if r.target_key == current_target_key)
 
 
 def calculate_risk_score(
-    *,
-    short_count: int,
-    long_count: int,
-    has_cookie: bool,
-    has_session: bool,
-    user_agent: str,
-    accept_language: str,
-    path: str,
+    history: list[SessionRequestRecord],
+    current_endpoint: str,
+    current_target_key: str,
 ) -> ScoreResult:
-    """Return risk score 0-100 with contributing reasons."""
+    """Calculate risk score from session behavior. Score: 0-100."""
     cfg = get_settings()
     score = 0
     reasons: list[str] = []
 
-    # --- 1. Rate-based scoring ---
-    short_ratio = short_count / max(cfg.rate_limit_short, 1)
-    long_ratio = long_count / max(cfg.rate_limit_long, 1)
-
-    if short_ratio > 1.0:
-        pts = min(int(short_ratio * 30), 40)
+    # Feature 1: Endpoint burst (0-40 points)
+    burst = compute_endpoint_burst_max_1s(history, current_endpoint)
+    if burst >= cfg.burst_threshold:
+        pts = min(40, (burst - cfg.burst_threshold + 1) * 15)
         score += pts
-        reasons.append(f"short_rate={short_count}/{cfg.rate_limit_short}")
-    elif short_ratio > 0.6:
-        pts = int(short_ratio * 15)
+        reasons.append(f"burst={burst}")
+
+    # Feature 2: Request interval CV (0-35 points)
+    cv = compute_req_interval_cv(history)
+    if len(history) >= 3 and cv < cfg.cv_threshold:
+        pts = min(35, int((cfg.cv_threshold - cv) / cfg.cv_threshold * 35))
         score += pts
-        reasons.append(f"short_rate_warn={short_count}/{cfg.rate_limit_short}")
+        reasons.append(f"cv={cv:.3f}")
 
-    if long_ratio > 1.0:
-        pts = min(int(long_ratio * 20), 30)
+    # Feature 3: Target retry count (0-25 points)
+    retries = compute_target_retry_count(history, current_target_key)
+    if retries >= cfg.retry_threshold:
+        pts = min(25, (retries - cfg.retry_threshold + 1) * 8)
         score += pts
-        reasons.append(f"long_rate={long_count}/{cfg.rate_limit_long}")
-    elif long_ratio > 0.6:
-        pts = int(long_ratio * 10)
-        score += pts
-        reasons.append(f"long_rate_warn={long_count}/{cfg.rate_limit_long}")
+        reasons.append(f"retries={retries}")
 
-    # --- 2. Session / cookie ---
-    if not has_cookie and not has_session:
-        score += 15
-        reasons.append("no_cookie_or_session")
+    features = {
+        "endpoint_burst_max_1s": burst,
+        "req_interval_cv": round(cv, 3),
+        "target_retry_count": retries,
+    }
 
-    # --- 3. Header stability ---
-    if not user_agent or user_agent.strip() == "":
-        score += 10
-        reasons.append("empty_ua")
-
-    if not accept_language or accept_language.strip() == "":
-        score += 5
-        reasons.append("no_accept_language")
-
-    # --- 4. Sensitive path weight ---
-    sensitive = cfg.get_sensitive_paths()
-    if any(path.startswith(sp) for sp in sensitive):
-        score += 10
-        reasons.append("sensitive_path")
-
-    return ScoreResult(score=min(score, 100), reasons=reasons)
+    return ScoreResult(
+        score=min(score, 100),
+        reasons=reasons,
+        features=features,
+    )
