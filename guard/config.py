@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ipaddress
 from functools import lru_cache
-from typing import List
 
 from pydantic_settings import BaseSettings
 
@@ -13,12 +12,6 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://redis:6379/0"
-
-    # HMAC
-    hmac_secret: str = "change-me-in-production"
-
-    # Token
-    token_ttl_seconds: int = 120
 
     # Rate windows (seconds) & limits
     rate_window_short: int = 10
@@ -42,21 +35,28 @@ class Settings(BaseSettings):
     # Sensitive paths
     sensitive_paths: str = "/seat,/reserve,/pay,/checkout,/order"
 
+    # Redirect target when bot detected (silent redirect)
+    redirect_url: str = "/"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     # --- helpers ---
 
-    def get_whitelist_ips(self) -> List[str]:
-        return [s.strip() for s in self.whitelist_ips.split(",") if s.strip()]
+    @staticmethod
+    def _parse_csv(value: str) -> list[str]:
+        return [s.strip() for s in value.split(",") if s.strip()]
 
-    def get_whitelist_paths(self) -> List[str]:
-        return [s.strip() for s in self.whitelist_paths.split(",") if s.strip()]
+    def get_whitelist_ips(self) -> list[str]:
+        return self._parse_csv(self.whitelist_ips)
 
-    def get_whitelist_uas(self) -> List[str]:
-        return [s.strip() for s in self.whitelist_uas.split(",") if s.strip()]
+    def get_whitelist_paths(self) -> list[str]:
+        return self._parse_csv(self.whitelist_paths)
 
-    def get_sensitive_paths(self) -> List[str]:
-        return [s.strip() for s in self.sensitive_paths.split(",") if s.strip()]
+    def get_whitelist_uas(self) -> list[str]:
+        return self._parse_csv(self.whitelist_uas)
+
+    def get_sensitive_paths(self) -> list[str]:
+        return self._parse_csv(self.sensitive_paths)
 
     def is_ip_whitelisted(self, ip: str) -> bool:
         try:

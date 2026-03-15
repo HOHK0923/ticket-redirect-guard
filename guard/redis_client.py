@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import redis.asyncio as redis
 
-from app.config import get_settings
+from guard.config import get_settings
 
 _pool: redis.Redis | None = None
 
