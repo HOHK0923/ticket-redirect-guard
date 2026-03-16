@@ -1,8 +1,7 @@
 """Queue (waiting page) logic.
 
-Flow: AI Quiz passed → enter queue → wait → risk score check → 302 redirect
-- Low risk → redirect to seat selection (pass to backend)
-- High risk → redirect to main page (blocked)
+Flow: AI Quiz passed → enter queue → wait → 302 redirect to seat selection
+All users go through the queue. No scoring — just wait and redirect.
 """
 
 from __future__ import annotations
@@ -15,10 +14,8 @@ from starlette.responses import HTMLResponse, JSONResponse
 from guard.config import get_settings
 from guard.metrics import metrics
 from guard.redis_client import get_redis
-from guard.request_parser import extract_session_id
-from guard.scorer import calculate_risk_score
+from guard.queue_token import issue_queue_pass
 from guard.session_tracker import (
-    get_history,
     get_queue_entered_time,
     is_quiz_passed,
     mark_quiz_passed,
@@ -84,7 +81,7 @@ QUEUE_PAGE_HTML = """<!DOCTYPE html>
                     window.location.href = data.redirect_to;
                 } else if (data.blocked) {
                     document.getElementById('status').textContent = '접근이 제한되었습니다.';
-                    setTimeout(() => { window.location.href = '/'; }, 2000);
+                    setTimeout(() => { window.location.href = data.redirect_to || '/'; }, 2000);
                 } else {
                     document.getElementById('status').textContent =
                         '대기 중... (' + (data.wait_seconds || 0) + '초)';
@@ -103,7 +100,14 @@ QUEUE_PAGE_HTML = """<!DOCTYPE html>
 
 async def handle_queue_enter(request: Request):
     """Enter the queue. Called after AI quiz passes."""
-    session_id = extract_session_id(request)
+    session_id = (
+        request.headers.get("uuid")
+        or request.headers.get("x-session-id")
+        or request.query_params.get("session_id", "")
+    )
+    if not session_id:
+        return JSONResponse({"error": "session_id required"}, status_code=400)
+
     r = await get_redis()
 
     # Mark quiz as passed (in real integration, validate quiz token here)
@@ -117,18 +121,26 @@ async def handle_queue_enter(request: Request):
 
 
 async def handle_queue_status(request: Request):
-    """Check queue status. Polled by the waiting page."""
+    """Check queue status. Polled by the waiting page every 2 seconds."""
     session_id = (
         request.headers.get("x-session-id")
         or request.cookies.get("guard_session")
-        or extract_session_id(request)
+        or ""
     )
+    if not session_id:
+        return JSONResponse({"ready": False, "blocked": True, "reason": "no_session"})
+
     cfg = get_settings()
     r = await get_redis()
 
     # Check if quiz was passed
     if not await is_quiz_passed(r, session_id):
-        return JSONResponse({"ready": False, "blocked": True, "reason": "quiz_not_passed"})
+        return JSONResponse({
+            "ready": False,
+            "blocked": True,
+            "reason": "quiz_not_passed",
+            "redirect_to": cfg.redirect_url,
+        })
 
     # Check wait time
     entered_at = await get_queue_entered_time(r, session_id)
@@ -145,24 +157,10 @@ async def handle_queue_status(request: Request):
             "wait_seconds": waited,
         })
 
-    # Compute risk score from session history
-    history = await get_history(r, session_id)
-    result = calculate_risk_score(
-        history=history,
-        current_endpoint="/queue/status",
-        current_target_key="",
-    )
-
-    if result.score >= cfg.score_high:
-        metrics.record_queue_block()
-        return JSONResponse({
-            "ready": False,
-            "blocked": True,
-            "reason": "risk_score_high",
-        })
-
-    # Pass! Redirect to seat selection
+    # Wait complete → issue queue pass token and 302 redirect
+    await issue_queue_pass(r, session_id)
     metrics.record_queue_pass()
+
     return JSONResponse({
         "ready": True,
         "blocked": False,

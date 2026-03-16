@@ -1,4 +1,4 @@
-"""Ticket Redirect Guard — standalone security proxy server.
+"""Ticket Redirect Guard — queue + 302 redirect security proxy.
 
 Architecture:
     Client → [AI Quiz] → Queue (this server) → 302 redirect → Backend
@@ -17,7 +17,6 @@ from starlette.routing import Route, Mount
 from guard import GuardMiddleware
 from guard.config import get_settings
 from guard.metrics import metrics
-from guard.middleware import guard_log
 from guard.proxy import close_client, proxy_request
 from guard.queue import handle_queue_enter, handle_queue_status
 from guard.redis_client import close_redis
@@ -33,10 +32,6 @@ async def get_metrics(request: Request):
     return JSONResponse(metrics.snapshot())
 
 
-async def get_log(request: Request):
-    return JSONResponse(list(guard_log))
-
-
 # --- Catch-all proxy ---
 
 async def proxy_catch_all(request: Request):
@@ -49,8 +44,8 @@ async def lifespan(app: Starlette):
     print(f"[guard] Security proxy started")
     print(f"[guard] Upstream: {cfg.upstream_url}")
     print(f"[guard] Guard enabled: {cfg.guard_enabled}")
-    print(f"[guard] Score threshold: {cfg.score_high}")
-    print(f"[guard] Feature thresholds: burst={cfg.burst_threshold}, cv={cfg.cv_threshold}, retry={cfg.retry_threshold}")
+    print(f"[guard] Queue wait: {cfg.queue_wait_min_seconds}s min")
+    print(f"[guard] Queue pass TTL: {cfg.queue_pass_ttl_seconds}s")
     yield
     await close_client()
     await close_redis()
@@ -63,23 +58,22 @@ app = Starlette(
         Mount("/_guard", routes=[
             Route("/health", health),
             Route("/metrics", get_metrics),
-            Route("/log", get_log),
             # Queue endpoints
             Route("/queue", handle_queue_enter, methods=["GET"]),
             Route("/queue/status", handle_queue_status, methods=["GET"]),
         ]),
-        # All other traffic → proxy to backend (guard middleware runs first)
+        # All other traffic → proxy to backend (middleware checks queue pass first)
         Route("/{path:path}", proxy_catch_all,
               methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]),
     ],
     middleware=[],
 )
 
-# Guard middleware — intercepts sensitive API requests before proxying
+# Queue gate middleware — no queue pass → 302 to queue
 app.add_middleware(
     GuardMiddleware,
     bypass_paths={
-        "/_guard/health", "/_guard/metrics", "/_guard/log",
+        "/_guard/health", "/_guard/metrics",
         "/_guard/queue", "/_guard/queue/status",
     },
 )

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
 from functools import cached_property, lru_cache
 
 from pydantic_settings import BaseSettings
@@ -16,35 +15,17 @@ class Settings(BaseSettings):
     # Upstream backend server to proxy to
     upstream_url: str = "http://localhost:8080"
 
-    # --- Session tracking ---
-    session_idle_timeout_seconds: int = 60
-
-    # --- AI feature thresholds ---
-    # endpoint_burst_max_1s: max calls to same endpoint in 1 second
-    burst_threshold: int = 3
-
-    # req_interval_cv: coefficient of variation of request intervals
-    # LOWER cv = more suspicious (mechanical/bot-like)
-    cv_threshold: float = 0.25
-
-    # target_retry_count: same target retried N+ times
-    retry_threshold: int = 2
-
-    # --- Score threshold ---
-    score_high: int = 45  # score >= this → block (302 redirect)
-
     # --- Queue ---
     queue_wait_min_seconds: int = 3  # minimum wait time in queue
+    queue_pass_ttl_seconds: int = 300  # queue pass token lifetime (5 min)
 
-    # --- Whitelist ---
-    whitelist_ips: str = ""
-    whitelist_paths: str = "/_guard/health,/_guard/metrics"
-    whitelist_uas: str = ""
+    # --- Session ---
+    session_ttl_seconds: int = 600  # session data TTL (10 min)
 
-    # --- Sensitive endpoint patterns ---
+    # --- Sensitive endpoint patterns (require queue pass) ---
     sensitive_paths: str = "/api/ticketing,/api/bookings,/api/payments"
 
-    # Redirect target when bot detected (silent redirect)
+    # Redirect URL (blocked / no queue pass)
     redirect_url: str = "/"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
@@ -56,49 +37,11 @@ class Settings(BaseSettings):
         return [s.strip() for s in value.split(",") if s.strip()]
 
     @cached_property
-    def _whitelist_ips(self) -> list[str]:
-        return self._parse_csv(self.whitelist_ips)
-
-    @cached_property
-    def _whitelist_paths(self) -> list[str]:
-        return self._parse_csv(self.whitelist_paths)
-
-    @cached_property
-    def _whitelist_uas(self) -> list[str]:
-        return self._parse_csv(self.whitelist_uas)
-
-    @cached_property
     def _sensitive_paths(self) -> list[str]:
         return self._parse_csv(self.sensitive_paths)
 
-    def get_whitelist_ips(self) -> list[str]:
-        return self._whitelist_ips
-
-    def get_whitelist_paths(self) -> list[str]:
-        return self._whitelist_paths
-
-    def get_whitelist_uas(self) -> list[str]:
-        return self._whitelist_uas
-
     def get_sensitive_paths(self) -> list[str]:
         return self._sensitive_paths
-
-    def is_ip_whitelisted(self, ip: str) -> bool:
-        try:
-            addr = ipaddress.ip_address(ip)
-        except ValueError:
-            return False
-        for entry in self.get_whitelist_ips():
-            try:
-                if "/" in entry:
-                    if addr in ipaddress.ip_network(entry, strict=False):
-                        return True
-                else:
-                    if addr == ipaddress.ip_address(entry):
-                        return True
-            except ValueError:
-                continue
-        return False
 
 
 @lru_cache

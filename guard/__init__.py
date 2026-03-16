@@ -1,4 +1,4 @@
-"""Ticket Redirect Guard — session-based bot detection security proxy."""
+"""Ticket Redirect Guard — queue + 302 redirect security proxy."""
 
 from guard.middleware import GuardMiddleware
 
